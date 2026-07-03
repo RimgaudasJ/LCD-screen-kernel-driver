@@ -1,0 +1,10 @@
+config LCD_SCREEN_DRIVER
+	tristate "HD44780 LCD over PCF8574 I2C backpack"
+	depends on I2C
+	help
+	  This driver registers an I2C client driver named "lcd-screen" for
+	  HD44780-compatible displays connected through a PCF8574 backpack.
+	  It exposes a character device at /dev/lcd-screen for writing text.
+
+	  To compile this driver as a module, choose M here. The module name
+	  is lcd_screen.
