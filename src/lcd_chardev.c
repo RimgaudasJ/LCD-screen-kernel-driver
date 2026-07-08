@@ -1,18 +1,206 @@
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
-#include <linux/kernel.h>
-#include <linux/delay.h>
 #include <linux/jiffies.h>
+#include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
 
 #include "lcd_screen.h"
+#include "lithuanian_chars.h"
+
+static u8 lcd_render_lith_char(int lith_idx, const int *slot_map)
+{
+    int slot;
+
+    if (lith_idx < 0)
+        return '?';
+
+    if (!lithuanian_chars[lith_idx].prefer_cgram)
+        return lithuanian_chars[lith_idx].fallback_ascii;
+
+    slot = slot_map[lith_idx];
+    if (slot >= 0)
+        return (u8)slot;
+
+    return lithuanian_chars[lith_idx].fallback_ascii;
+}
+
+static int lcd_count_logical_chars(const char *buf, int len)
+{
+    int i = 0;
+    int chars = 0;
+
+    while (i < len) {
+        u8 b = (u8)buf[i];
+
+        if (b <= 0x7F) {
+            chars++;
+            i++;
+            continue;
+        }
+
+        if ((b == 0xC4 || b == 0xC5) && (i + 1) < len) {
+            chars++;
+            i += 2;
+            continue;
+        }
+
+        if (b >= 0x80 && b <= 0xBF) {
+            i++;
+            continue;
+        }
+
+        chars++;
+        i++;
+    }
+
+    return chars;
+}
+
+static int lcd_find_byte_offset_for_char(const struct lcd_screen *lcd, int logical_char)
+{
+    int i = 0;
+    int chars = 0;
+
+    while (i < lcd->msg_len && chars < logical_char) {
+        u8 b = (u8)lcd->msg_buffer[i];
+
+        if (b <= 0x7F) {
+            i++;
+            chars++;
+            continue;
+        }
+
+        if ((b == 0xC4 || b == 0xC5) && (i + 1) < lcd->msg_len) {
+            i += 2;
+            chars++;
+            continue;
+        }
+
+        if (b >= 0x80 && b <= 0xBF) {
+            i++;
+            continue;
+        }
+
+        i++;
+        chars++;
+    }
+
+    return i;
+}
+
+static int lcd_collect_page_chars(const struct lcd_screen *lcd, int start_char,
+                                  int *needed, int max_needed)
+{
+    int byte_idx = lcd_find_byte_offset_for_char(lcd, start_char);
+    int rendered = 0;
+    int needed_count = 0;
+
+    while (rendered < LCD_PAGE_SIZE_BYTES && byte_idx < lcd->msg_len) {
+        u8 b0 = (u8)lcd->msg_buffer[byte_idx];
+
+        if (b0 <= 0x7F) {
+            rendered++;
+            byte_idx++;
+            continue;
+        }
+
+        if ((b0 == 0xC4 || b0 == 0xC5) && (byte_idx + 1) < lcd->msg_len) {
+            u8 b1 = (u8)lcd->msg_buffer[byte_idx + 1];
+            int lith_idx = lith_find_char(b0, b1);
+
+            if (lith_idx >= 0 && lithuanian_chars[lith_idx].prefer_cgram) {
+                int i;
+                bool exists = false;
+
+                for (i = 0; i < needed_count; i++) {
+                    if (needed[i] == lith_idx) {
+                        exists = true;
+                        break;
+                    }
+                }
+
+                if (!exists && needed_count < max_needed)
+                    needed[needed_count++] = lith_idx;
+            }
+
+            rendered++;
+            byte_idx += 2;
+            continue;
+        }
+
+        if (b0 >= 0x80 && b0 <= 0xBF) {
+            byte_idx++;
+            continue;
+        }
+
+        rendered++;
+        byte_idx++;
+    }
+
+    return needed_count;
+}
 
 static int lcd_display_page_locked(struct lcd_screen *lcd)
 {
-    int start_idx = lcd->current_page * LCD_PAGE_SIZE_BYTES;
+    int start_char = lcd->current_page * LCD_PAGE_SIZE_BYTES;
+    int needed[ARRAY_SIZE(lithuanian_chars)];
+    int slot_map[ARRAY_SIZE(lithuanian_chars)];
+    u8 render[LCD_PAGE_SIZE_BYTES];
+    int needed_count;
+    int loaded_count;
+    int byte_idx;
+    int rendered = 0;
     int i;
     int ret;
+
+    memset(slot_map, -1, sizeof(slot_map));
+    memset(render, ' ', sizeof(render));
+
+    needed_count = lcd_collect_page_chars(lcd, start_char, needed,
+                                          ARRAY_SIZE(needed));
+    loaded_count = min(needed_count, LCD_CGRAM_SLOTS);
+
+    /* HD44780 exposes only 8 CGRAM slots; approximated letters do not consume them. */
+
+    for (i = 0; i < loaded_count; i++) {
+        int lith_idx = needed[i];
+
+        slot_map[lith_idx] = i;
+        ret = lcd_hw_load_cgram(lcd->client, i, lithuanian_chars[lith_idx].bitmap);
+        if (ret)
+            return ret;
+    }
+
+    byte_idx = lcd_find_byte_offset_for_char(lcd, start_char);
+    while (rendered < LCD_PAGE_SIZE_BYTES && byte_idx < lcd->msg_len) {
+        u8 b0 = (u8)lcd->msg_buffer[byte_idx];
+
+        if (b0 <= 0x7F) {
+            render[rendered++] = b0;
+            byte_idx++;
+            continue;
+        }
+
+        if ((b0 == 0xC4 || b0 == 0xC5) && (byte_idx + 1) < lcd->msg_len) {
+            u8 b1 = (u8)lcd->msg_buffer[byte_idx + 1];
+            int lith_idx = lith_find_char(b0, b1);
+
+            render[rendered++] = lcd_render_lith_char(lith_idx, slot_map);
+
+            byte_idx += 2;
+            continue;
+        }
+
+        if (b0 >= 0x80 && b0 <= 0xBF) {
+            byte_idx++;
+            continue;
+        }
+
+        render[rendered++] = '?';
+        byte_idx++;
+    }
 
     ret = lcd_hw_send_cmd(lcd->client, 0x01);
     if (ret)
@@ -24,10 +212,7 @@ static int lcd_display_page_locked(struct lcd_screen *lcd)
         return ret;
 
     for (i = 0; i < LCD_COLS; i++) {
-        int char_idx = start_idx + i;
-        u8 ch = (char_idx < lcd->msg_len) ? lcd->msg_buffer[char_idx] : ' ';
-
-        ret = lcd_hw_send_data(lcd->client, ch);
+        ret = lcd_hw_send_data(lcd->client, render[i]);
         if (ret)
             return ret;
     }
@@ -37,10 +222,7 @@ static int lcd_display_page_locked(struct lcd_screen *lcd)
         return ret;
 
     for (i = 0; i < LCD_COLS; i++) {
-        int char_idx = start_idx + LCD_COLS + i;
-        u8 ch = (char_idx < lcd->msg_len) ? lcd->msg_buffer[char_idx] : ' ';
-
-        ret = lcd_hw_send_data(lcd->client, ch);
+        ret = lcd_hw_send_data(lcd->client, render[LCD_COLS + i]);
         if (ret)
             return ret;
     }
@@ -50,10 +232,10 @@ static int lcd_display_page_locked(struct lcd_screen *lcd)
 
 static int lcd_total_pages(const struct lcd_screen *lcd)
 {
-    if (lcd->msg_len <= 0)
+    if (lcd->msg_chars <= 0)
         return 1;
 
-    return DIV_ROUND_UP(lcd->msg_len, LCD_PAGE_SIZE_BYTES);
+    return DIV_ROUND_UP(lcd->msg_chars, LCD_PAGE_SIZE_BYTES);
 }
 
 static void lcd_page_work_handler(struct work_struct *work)
@@ -137,12 +319,13 @@ static ssize_t lcd_write(struct file *file, const char __user *buf, size_t count
     }
 
     lcd->msg_len = (int)out;
+    lcd->msg_chars = lcd_count_logical_chars(lcd->msg_buffer, lcd->msg_len);
     lcd->current_page = 0;
 
     ret = lcd_display_page_locked(lcd);
     if (!ret)
         mod_delayed_work(system_wq, &lcd->page_work,
-                 msecs_to_jiffies(LCD_PAGE_INTERVAL_MS));
+                         msecs_to_jiffies(LCD_PAGE_INTERVAL_MS));
 
     mutex_unlock(&lcd->io_lock);
 

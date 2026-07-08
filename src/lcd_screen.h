@@ -15,6 +15,7 @@
 #define LCD_COLS 16
 #define LCD_ROWS 2
 #define LCD_PAGE_SIZE_BYTES (LCD_COLS * LCD_ROWS)
+#define LCD_CGRAM_SLOTS 8
 #define LCD_MAX_MSG_LEN 256
 #define LCD_PAGE_INTERVAL_MS 3000
 
@@ -33,6 +34,7 @@ struct lcd_screen {
     struct mutex io_lock;
     char msg_buffer[LCD_MAX_MSG_LEN];
     int msg_len;
+    int msg_chars;
     int current_page;
     struct delayed_work page_work;
 };
@@ -40,6 +42,7 @@ struct lcd_screen {
 int lcd_hw_init_sequence(struct i2c_client *client);
 int lcd_hw_send_cmd(struct i2c_client *client, u8 cmd);
 int lcd_hw_send_data(struct i2c_client *client, u8 data);
+int lcd_hw_load_cgram(struct i2c_client *client, u8 slot, const u8 *bitmap);
 int lcd_hw_backlight_off(struct i2c_client *client);
 
 int lcd_chardev_register(struct lcd_screen *lcd);

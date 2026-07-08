@@ -64,6 +64,27 @@ int lcd_hw_send_data(struct i2c_client *client, u8 data)
     return lcd_send_byte(client, data, LCD_RS);
 }
 
+int lcd_hw_load_cgram(struct i2c_client *client, u8 slot, const u8 *bitmap)
+{
+    int i;
+    int ret;
+
+    if (slot >= LCD_CGRAM_SLOTS)
+        return -EINVAL;
+
+    ret = lcd_hw_send_cmd(client, 0x40 + (slot * 8));
+    if (ret)
+        return ret;
+
+    for (i = 0; i < 8; i++) {
+        ret = lcd_hw_send_data(client, bitmap[i]);
+        if (ret)
+            return ret;
+    }
+
+    return lcd_hw_send_cmd(client, 0x80);
+}
+
 int lcd_hw_backlight_off(struct i2c_client *client)
 {
     return pcf8574_write(client, 0x00);
