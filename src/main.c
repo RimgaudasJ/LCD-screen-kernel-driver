@@ -4,7 +4,7 @@
 #include "lcd_screen.h"
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("AI Collaborator");
+MODULE_AUTHOR("Rimgaudas Jurkaitis");
 MODULE_DESCRIPTION("RPi3B I2C LCD Driver (HD44780 via PCF8574)");
 MODULE_VERSION("1.0");
 
