@@ -344,55 +344,81 @@ static const struct file_operations lcd_fops = {
     .write = lcd_write,
 };
 
+static void lcd_chardev_cleanup(struct lcd_screen *lcd, bool chrdev_registered,
+                                bool cdev_added, bool class_created,
+                                bool device_created)
+{
+    if (device_created)
+        device_destroy(lcd->class, lcd->devt);
+
+    if (class_created)
+        class_destroy(lcd->class);
+
+    if (cdev_added)
+        cdev_del(&lcd->cdev);
+
+    if (chrdev_registered)
+        unregister_chrdev_region(lcd->devt, 1);
+
+    cancel_delayed_work_sync(&lcd->page_work);
+}
+
 int lcd_chardev_register(struct lcd_screen *lcd)
 {
     int ret;
+    bool chrdev_registered = false;
+    bool cdev_added = false;
+    bool class_created = false;
+    bool device_created = false;
 
     INIT_DELAYED_WORK(&lcd->page_work, lcd_page_work_handler);
 
     ret = alloc_chrdev_region(&lcd->devt, 0, 1, LCD_DEVICE_NAME);
-    if (ret)
-        goto err_timer;
+    if (ret) {
+        lcd_chardev_cleanup(lcd, chrdev_registered, cdev_added,
+                            class_created, device_created);
+        return ret;
+    }
+
+    chrdev_registered = true;
 
     cdev_init(&lcd->cdev, &lcd_fops);
     lcd->cdev.owner = THIS_MODULE;
 
     ret = cdev_add(&lcd->cdev, lcd->devt, 1);
-    if (ret)
-        goto err_unregister;
+    if (ret) {
+        lcd_chardev_cleanup(lcd, chrdev_registered, cdev_added,
+                            class_created, device_created);
+        return ret;
+    }
+
+    cdev_added = true;
 
     lcd->class = class_create(LCD_CLASS_NAME);
     if (IS_ERR(lcd->class)) {
         ret = PTR_ERR(lcd->class);
-        goto err_cdev;
+        lcd_chardev_cleanup(lcd, chrdev_registered, cdev_added,
+                            class_created, device_created);
+        return ret;
     }
+
+    class_created = true;
 
     lcd->device = device_create(lcd->class, &lcd->client->dev, lcd->devt, NULL,
                                 LCD_DEVICE_NAME);
     if (IS_ERR(lcd->device)) {
         ret = PTR_ERR(lcd->device);
-        goto err_class;
+        lcd_chardev_cleanup(lcd, chrdev_registered, cdev_added,
+                            class_created, device_created);
+        return ret;
     }
 
-    return 0;
+    device_created = true;
 
-err_class:
-    class_destroy(lcd->class);
-err_cdev:
-    cdev_del(&lcd->cdev);
-err_unregister:
-    unregister_chrdev_region(lcd->devt, 1);
-err_timer:
-    cancel_delayed_work_sync(&lcd->page_work);
-    return ret;
+    return 0;
 }
 
 void lcd_chardev_unregister(struct lcd_screen *lcd)
 {
-    cancel_delayed_work_sync(&lcd->page_work);
-
-    device_destroy(lcd->class, lcd->devt);
-    class_destroy(lcd->class);
-    cdev_del(&lcd->cdev);
-    unregister_chrdev_region(lcd->devt, 1);
+    lcd_chardev_cleanup(lcd, true, true, true, true);
 }

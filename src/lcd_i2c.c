@@ -18,25 +18,24 @@ static int lcd_probe(struct i2c_client *client)
     i2c_set_clientdata(client, lcd);
 
     ret = lcd_chardev_register(lcd);
-    if (ret)
-        goto err_mutex;
+    if (ret) {
+        mutex_destroy(&lcd->io_lock);
+        return ret;
+    }
 
     mutex_lock(&lcd->io_lock);
     ret = lcd_hw_init_sequence(client);
     mutex_unlock(&lcd->io_lock);
-    if (ret)
-        goto err_chardev;
+    if (ret) {
+        lcd_chardev_unregister(lcd);
+        mutex_destroy(&lcd->io_lock);
+        return ret;
+    }
 
     lcd_paging_start(lcd);
 
     dev_info(&client->dev, "registered /dev/%s\n", LCD_DEVICE_NAME);
     return 0;
-
-err_chardev:
-    lcd_chardev_unregister(lcd);
-err_mutex:
-    mutex_destroy(&lcd->io_lock);
-    return ret;
 }
 
 static void lcd_remove(struct i2c_client *client)
